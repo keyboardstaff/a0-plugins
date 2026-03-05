@@ -1,4 +1,4 @@
-name: Validate Plugin PR
+name: Validate Plugin PR (auto)
 
 on:
   pull_request_target:

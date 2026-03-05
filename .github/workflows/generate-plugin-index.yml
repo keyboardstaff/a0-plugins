@@ -1,8 +1,4 @@
-name: Generate Plugin Index
-
-concurrency:
-  group: index-release-publisher
-  cancel-in-progress: false
+name: Generate Plugin Index (manual)
 
 on:
   workflow_call:

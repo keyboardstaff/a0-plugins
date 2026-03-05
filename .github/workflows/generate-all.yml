@@ -1,5 +1,9 @@
 name: Generate All (manual)
 
+concurrency:
+  group: index-release-publisher
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:

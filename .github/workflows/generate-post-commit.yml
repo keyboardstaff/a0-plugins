@@ -1,4 +1,4 @@
-name: Generate Post Commit
+name: Generate Post Commit (auto)
 
 concurrency:
   group: index-release-publisher

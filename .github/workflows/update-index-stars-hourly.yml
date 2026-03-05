@@ -1,4 +1,4 @@
-name: Update Index Stars (hourly)
+name: Update Index Stars (auto)
 
 concurrency:
   group: index-release-publisher

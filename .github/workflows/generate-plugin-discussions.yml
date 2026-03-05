@@ -1,8 +1,4 @@
-name: Generate Plugin Discussions
-
-concurrency:
-  group: index-release-publisher
-  cancel-in-progress: false
+name: Generate Plugin Discussions (manual)
 
 on:
   workflow_call:
