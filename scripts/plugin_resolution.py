@@ -71,14 +71,15 @@ def get_plugin_names() -> list[str]:
     if not plugin_names:
         return []
 
-    start_from = os.environ.get("START_FROM", "").strip()
-    if start_from:
-        if start_from in plugin_names:
-            idx = plugin_names.index(start_from)
-            plugin_names = plugin_names[idx:]
-            print(f"START_FROM={start_from} specified. Skipping first {idx} plugins.")
-        else:
-            print(f"WARN: START_FROM={start_from} not found in affected plugins list. Ignoring it.")
+    start_from_str = os.environ.get("START_FROM", "").strip()
+    if start_from_str:
+        try:
+            start_from_idx = int(start_from_str)
+            if start_from_idx > 0:
+                plugin_names = plugin_names[start_from_idx:]
+                print(f"START_FROM={start_from_idx} specified. Skipping first {start_from_idx} plugins.")
+        except ValueError:
+            print(f"WARN: START_FROM={start_from_str} is not a valid integer. Ignoring it.")
 
     max_plugins = int(os.environ.get("MAX_PLUGINS", str(DEFAULT_MAX_PLUGINS)))
     if len(plugin_names) > max_plugins:

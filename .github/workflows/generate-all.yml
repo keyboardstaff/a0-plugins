@@ -12,9 +12,9 @@ on:
         required: false
         default: "1000"
       start_from:
-        description: "Start processing from this plugin name (skips alphabetical plugins before it)"
+        description: "Start processing from this plugin index (skips plugins before it)"
         required: false
-        default: ""
+        default: "0"
       plugin_names:
         description: "Comma-separated list of plugins to process"
         required: false
@@ -26,7 +26,7 @@ jobs:
     secrets: inherit
     with:
       max_plugins: ${{ github.event.inputs.max_plugins || '1000' }}
-      start_from: ${{ github.event.inputs.start_from || '' }}
+      start_from: ${{ github.event.inputs.start_from || '0' }}
       plugin_names: ${{ github.event.inputs.plugin_names || '' }}
 
   generate-discussions:
@@ -35,5 +35,5 @@ jobs:
     secrets: inherit
     with:
       max_plugins: ${{ github.event.inputs.max_plugins || '1000' }}
-      start_from: ${{ github.event.inputs.start_from || '' }}
+      start_from: ${{ github.event.inputs.start_from || '0' }}
       plugin_names: ${{ github.event.inputs.plugin_names || '' }}
