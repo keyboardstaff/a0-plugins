@@ -11,6 +11,11 @@ Each plugin submission is a single folder (unique plugin name) containing:
 - **Optional thumbnail image** (`.png`, `.jpeg`/`.jpg`, or `.webp`)
   - **Square aspect ratio**
   - **Max size: 20 KB**
+- **Optional screenshots** under `screenshots/`
+  - Up to **3 screenshots**
+  - File names must be numeric: **`1`**, **`2`**, **`3`** (with image extension)
+  - Allowed formats: `.png`, `.jpg`/`.jpeg`, `.webp`
+  - **Max size: 250 KB per screenshot**
 
 This repository is an index only: `plugin.yaml` points to the plugin's own repository.
 
@@ -39,7 +44,7 @@ PRs are automatically checked for:
 
 - **Structure**
   - Exactly one plugin folder per PR under `plugins/<your-plugin-name>/`
-  - No extra files (only `plugin.yaml` and an optional thumbnail)
+  - No extra files (only `plugin.yaml`, an optional thumbnail, and optional files in `screenshots/`)
 - **`plugin.yaml` rules**
   - Only allowed fields: `title`, `description`, `github`, `tags`
   - Required fields: `title`, `description`, `github`
@@ -51,6 +56,12 @@ PRs are automatically checked for:
   - Must be named `thumbnail.<ext>`
   - Must be square and <= 20 KB
   - Allowed formats: `.png`, `.jpg`/`.jpeg`, `.webp`
+- **Screenshot rules (optional)**
+  - Must be under `screenshots/`
+  - Up to 3 files total
+  - Filenames must be `1.<ext>`, `2.<ext>`, `3.<ext>`
+  - Allowed formats: `.png`, `.jpg`/`.jpeg`, `.webp`
+  - Max size per file: 250 KB
 
 ### Folder structure
 
@@ -58,6 +69,10 @@ PRs are automatically checked for:
 plugins/<your-plugin-name>/
   plugin.yaml
   thumbnail.png|thumbnail.jpg|thumbnail.jpeg|thumbnail.webp   (optional)
+  screenshots/                                            (optional)
+    1.png|1.jpg|1.jpeg|1.webp
+    2.png|2.jpg|2.jpeg|2.webp
+    3.png|3.jpg|3.jpeg|3.webp
 ```
 
 ### `plugin.yaml` format

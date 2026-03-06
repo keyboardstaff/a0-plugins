@@ -15,6 +15,8 @@ from plugin_resolution import (
 )
 
 INDEX_JSON_PATH = REPO_ROOT / "index.json"
+AUTHORS_DIR = REPO_ROOT / "authors"
+ALLOWED_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 class GenerateIndexError(Exception):
@@ -54,6 +56,15 @@ def _load_index() -> dict[str, Any]:
 def _plugin_exists(plugin_name: str) -> bool:
     plugin_yaml = PLUGINS_DIR / plugin_name / "plugin.yaml"
     return plugin_yaml.exists()
+
+
+def _full_scan_requested() -> bool:
+    plugin_names_env = os.environ.get("PLUGIN_NAMES", "").strip()
+    if plugin_names_env:
+        return False
+
+    before = os.environ.get("BEFORE_SHA", "").strip()
+    return not before or set(before) == {"0"}
 
 
 def _prune_removed_plugins(index: dict[str, Any]) -> int:
@@ -98,6 +109,8 @@ def _index_plugin_entry(plugin_name: str, meta: dict[str, Any]) -> dict[str, Any
         tags = [t for t in tags_val if t.strip()]
     thumb_rel = _thumbnail_rel_path(plugin_name)
     thumb = _repo_file_url(thumb_rel) if isinstance(thumb_rel, str) else None
+    screenshot_rels = _screenshot_rel_paths(plugin_name)
+    screenshots = [_repo_file_url(rel) for rel in screenshot_rels]
     return {
         "title": title,
         "description": description,
@@ -105,6 +118,7 @@ def _index_plugin_entry(plugin_name: str, meta: dict[str, Any]) -> dict[str, Any
         "author": author,
         "tags": tags,
         "thumbnail": thumb,
+        "screenshots": screenshots,
     }
 
 
@@ -132,6 +146,7 @@ def _upsert_index_plugin(
     entry["author"] = generated.get("author")
     entry["tags"] = generated.get("tags")
     entry["thumbnail"] = generated.get("thumbnail")
+    entry["screenshots"] = generated.get("screenshots")
     if discussion_url is not None:
         entry["discussion"] = discussion_url
 
@@ -142,11 +157,72 @@ def _thumbnail_rel_path(plugin_name: str) -> str | None:
     plugin_dir = PLUGINS_DIR / plugin_name
     if not plugin_dir.exists():
         return None
-    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+    for ext in ALLOWED_IMAGE_EXTS:
         p = plugin_dir / f"thumbnail{ext}"
         if p.exists():
             return p.relative_to(REPO_ROOT).as_posix()
     return None
+
+
+def _screenshot_rel_paths(plugin_name: str) -> list[str]:
+    plugin_dir = PLUGINS_DIR / plugin_name
+    screenshots_dir = plugin_dir / "screenshots"
+    if not screenshots_dir.exists() or not screenshots_dir.is_dir():
+        return []
+
+    rel_paths: list[str] = []
+    for filename in ("1", "2", "3"):
+        for ext in ALLOWED_IMAGE_EXTS:
+            p = screenshots_dir / f"{filename}{ext}"
+            if p.exists():
+                rel_paths.append(p.relative_to(REPO_ROOT).as_posix())
+                break
+
+    return rel_paths
+
+
+def _read_authors() -> dict[str, Any]:
+    if not AUTHORS_DIR.exists() or not AUTHORS_DIR.is_dir():
+        return {}
+
+    authors: dict[str, Any] = {}
+    for author_dir in sorted(AUTHORS_DIR.iterdir(), key=lambda x: x.name):
+        if not author_dir.is_dir():
+            continue
+        author_yaml = author_dir / "author.yaml"
+        if not author_yaml.exists():
+            continue
+        try:
+            loaded = yaml.safe_load(author_yaml.read_text(encoding="utf-8"))
+        except Exception as e:
+            _fail(f"Invalid author metadata in {author_yaml.relative_to(REPO_ROOT)}: {e}")
+
+        if not isinstance(loaded, dict):
+            _fail(f"{author_yaml.relative_to(REPO_ROOT)} must contain a YAML mapping/object")
+
+        authors[author_dir.name] = loaded
+
+    return authors
+
+
+def _authors_changed() -> bool:
+    before = os.environ.get("BEFORE_SHA", "").strip()
+    after = os.environ.get("AFTER_SHA", "").strip()
+
+    if not before or not after:
+        return False
+
+    changed = _run(["git", "diff", "--name-only", f"{before}..{after}"]).splitlines()
+    return any(line.strip().startswith("authors/") for line in changed)
+
+
+def _maybe_update_authors(index: dict[str, Any]) -> None:
+    existing = index.get("authors")
+    authors_missing = not isinstance(existing, dict)
+    if not authors_missing and not _authors_changed():
+        return
+
+    index["authors"] = _read_authors()
 
 
 def _repo_file_url(rel_path: str) -> str:
@@ -216,12 +292,23 @@ def main() -> int:
         _fail("GITHUB_REPOSITORY is required")
 
     plugin_names = get_plugin_names()
-    if not plugin_names:
-        print("No plugin changes detected; index left as is.")
-        return 0
 
     index = _load_index()
     index_before = json.dumps(index, sort_keys=True)
+
+    if _full_scan_requested():
+        removed = _prune_removed_plugins(index)
+        if removed:
+            print(f"Pruned {removed} removed plugins during full scan")
+
+    if not plugin_names:
+        _maybe_update_authors(index)
+        index_after = json.dumps(index, sort_keys=True)
+        if index_after != index_before:
+            _save_index(index)
+            print(f"Updated {INDEX_JSON_PATH.name}")
+        print("No plugin changes detected; index left as is.")
+        return 0
 
     updated = 0
 
@@ -244,6 +331,8 @@ def main() -> int:
         discussion_url = existing_entry.get("discussion") if isinstance(existing_entry.get("discussion"), str) else None
         _upsert_index_plugin(index, plugin_name, meta, discussion_url)
         updated += 1
+
+    _maybe_update_authors(index)
 
     index_after = json.dumps(index, sort_keys=True)
     if index_after != index_before:

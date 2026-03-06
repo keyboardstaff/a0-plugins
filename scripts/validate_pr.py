@@ -20,8 +20,12 @@ ALLOWED_YAML_KEYS = {"title", "description", "github", "tags"}
 REQUIRED_YAML_KEYS = {"title", "description", "github"}
 ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_IMAGE_BYTES = 20 * 1024
+MAX_SCREENSHOT_BYTES = 250 * 1024
 MAX_TAGS = 5
 THUMBNAIL_BASENAME = "thumbnail"
+SCREENSHOTS_DIRNAME = "screenshots"
+MAX_SCREENSHOTS = 3
+ALLOWED_SCREENSHOT_BASENAMES = {"1", "2", "3"}
 MAX_TITLE_LENGTH = 50
 MAX_DESCRIPTION_LENGTH = 500
 
@@ -178,6 +182,25 @@ def _validate_thumbnail(image_path: Path) -> None:
         )
 
 
+def _validate_screenshot(image_path: Path) -> None:
+    if image_path.suffix.lower() not in ALLOWED_IMAGE_EXTS:
+        _fail(
+            f"Screenshot must be one of {sorted(ALLOWED_IMAGE_EXTS)}: {image_path.relative_to(REPO_ROOT)}"
+        )
+
+    size = image_path.stat().st_size
+    if size > MAX_SCREENSHOT_BYTES:
+        _fail(
+            f"Screenshot is too large ({size} bytes). Max is {MAX_SCREENSHOT_BYTES} bytes: {image_path.relative_to(REPO_ROOT)}"
+        )
+
+    try:
+        with Image.open(image_path) as _:
+            pass
+    except Exception as e:
+        _fail(f"Screenshot image could not be opened: {image_path.relative_to(REPO_ROOT)}: {e}")
+
+
 def _github_api_get_json(url: str) -> dict:
     token = os.environ.get("GITHUB_TOKEN")
     headers = {
@@ -284,27 +307,53 @@ def main() -> int:
     if plugin_yaml_path not in plugin_files:
         _fail(f"Missing required file in PR head: {plugin_yaml_path}")
 
-    # Validate no extra files and optional thumbnail naming.
+    # Validate no extra files and optional thumbnail/screenshots naming.
     thumbnails: list[str] = []
+    screenshots: list[str] = []
     for f in plugin_files:
-        name = f.split("/")[-1]
+        path_obj = Path(f)
+        name = path_obj.name
         if name == "plugin.yaml":
             continue
-        suffix = Path(name).suffix.lower()
-        if suffix in ALLOWED_IMAGE_EXTS:
-            stem = Path(name).stem.lower()
-            if stem != THUMBNAIL_BASENAME:
+
+        if len(path_obj.parts) == 3 and path_obj.parts[1] == SCREENSHOTS_DIRNAME:
+            suffix = path_obj.suffix.lower()
+            if suffix not in ALLOWED_IMAGE_EXTS:
                 _fail(
-                    f"Thumbnail must be named '{THUMBNAIL_BASENAME}<ext>' (e.g. thumbnail.png). Found: {f}"
+                    f"Screenshot must use one of {sorted(ALLOWED_IMAGE_EXTS)}: {f}"
                 )
-            thumbnails.append(f)
+            if path_obj.stem not in ALLOWED_SCREENSHOT_BASENAMES:
+                _fail(
+                    f"Screenshot filename must be numbered 1, 2, or 3 (example: screenshots/1.png). Found: {f}"
+                )
+            screenshots.append(f)
             continue
+
+        if len(path_obj.parts) == 2:
+            suffix = path_obj.suffix.lower()
+            if suffix in ALLOWED_IMAGE_EXTS:
+                stem = path_obj.stem.lower()
+                if stem != THUMBNAIL_BASENAME:
+                    _fail(
+                        f"Thumbnail must be named '{THUMBNAIL_BASENAME}<ext>' (e.g. thumbnail.png). Found: {f}"
+                    )
+                thumbnails.append(f)
+                continue
+
         _fail(
-            f"Unsupported file in plugin folder: {f}. Only plugin.yaml and an optional thumbnail image are allowed."
+            "Unsupported file in plugin folder: "
+            f"{f}. Only plugin.yaml, an optional thumbnail image, and optional screenshots/1|2|3.<ext> files are allowed."
         )
 
     if len(thumbnails) > 1:
         _fail("At most one thumbnail image is allowed. Found: " + ", ".join(thumbnails))
+
+    if len(screenshots) > MAX_SCREENSHOTS:
+        _fail(f"At most {MAX_SCREENSHOTS} screenshots are allowed. Found: " + ", ".join(screenshots))
+
+    screenshot_numbers = {Path(p).stem for p in screenshots}
+    if len(screenshot_numbers) != len(screenshots):
+        _fail("Duplicate screenshot numbers are not allowed. Use each of 1, 2, 3 at most once.")
 
     plugin_yaml_bytes = _git_show_bytes(head_sha, plugin_yaml_path)
     _validate_yaml_bytes(plugin_yaml_path, plugin_yaml_bytes)
@@ -317,6 +366,19 @@ def main() -> int:
             tmp_path = Path(tmp.name)
         try:
             _validate_thumbnail(tmp_path)
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    for screenshot_path in screenshots:
+        screenshot_bytes = _git_show_bytes(head_sha, screenshot_path)
+        with tempfile.NamedTemporaryFile(suffix=Path(screenshot_path).suffix, delete=False) as tmp:
+            tmp.write(screenshot_bytes)
+            tmp_path = Path(tmp.name)
+        try:
+            _validate_screenshot(tmp_path)
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
