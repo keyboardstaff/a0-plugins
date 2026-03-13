@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import re
@@ -36,6 +37,10 @@ def _fail(msg: str) -> NoReturn:
     raise ValidatePluginSubmissionError(msg)
 
 
+def _warn(msg: str) -> None:
+    print(f"WARNING: {msg}")
+
+
 def _run(cmd: list[str]) -> str:
     out = subprocess.check_output(cmd, cwd=REPO_ROOT)
     return out.decode("utf-8", errors="replace")
@@ -53,10 +58,32 @@ def _base_head() -> tuple[str, str]:
     return base, head
 
 
-def _changed_files() -> list[str]:
+def _head_sha() -> str:
+    _, head = _base_head()
+    return head
+
+
+def _changed_entries() -> list[tuple[str, list[str]]]:
     base, head = _base_head()
-    raw = _run(["git", "diff", "--name-only", f"{base}..{head}"])
-    return [line.strip() for line in raw.splitlines() if line.strip()]
+    raw = _run(["git", "diff", "--name-status", f"{base}..{head}"])
+    entries: list[tuple[str, list[str]]] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split("\t") if part.strip()]
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        paths = parts[1:]
+        entries.append((status, paths))
+    return entries
+
+
+def _all_changed_paths(entries: list[tuple[str, list[str]]]) -> list[str]:
+    out: list[str] = []
+    for _, paths in entries:
+        out.extend(paths)
+    return out
 
 
 def _submission_plugin_name(paths: list[str]) -> str:
@@ -78,21 +105,65 @@ def _submission_plugin_name(paths: list[str]) -> str:
     return next(iter(plugin_names))
 
 
+def _is_deletion_pr(entries: list[tuple[str, list[str]]], plugin_name: str) -> bool:
+    if not entries:
+        return False
+    for status, paths in entries:
+        if not status.startswith("D"):
+            return False
+        for path in paths:
+            parts = Path(path).parts
+            if len(parts) < 2 or parts[0] != "plugins" or parts[1] != plugin_name:
+                return False
+    return True
+
+
 def _plugin_dir(plugin_name: str) -> Path:
     return PLUGINS_DIR / plugin_name
 
 
+def _git_path_exists(commit: str, rel_path: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}:{rel_path}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _git_read_text(commit: str, rel_path: str) -> str:
+    try:
+        out = subprocess.check_output(["git", "show", f"{commit}:{rel_path}"], cwd=REPO_ROOT)
+    except subprocess.CalledProcessError:
+        _fail(f"Missing {Path(rel_path).name}: {rel_path}")
+    return out.decode("utf-8", errors="replace")
+
+
+def _git_read_bytes(commit: str, rel_path: str) -> bytes:
+    try:
+        return subprocess.check_output(["git", "show", f"{commit}:{rel_path}"], cwd=REPO_ROOT)
+    except subprocess.CalledProcessError:
+        _fail(f"Missing file in PR head: {rel_path}")
+
+
+def _git_plugin_files(commit: str, plugin_name: str) -> list[str]:
+    raw = _run(["git", "ls-tree", "--name-only", f"{commit}:plugins/{plugin_name}"])
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
 def _read_plugin_yaml(plugin_name: str) -> dict[str, Any]:
-    plugin_yaml = _plugin_dir(plugin_name) / INDEX_YAML_NAME
-    if not plugin_yaml.exists():
-        _fail(f"Missing {INDEX_YAML_NAME}: {plugin_yaml.relative_to(REPO_ROOT)}")
-    raw_text = plugin_yaml.read_text(encoding="utf-8")
+    commit = _head_sha()
+    rel_path = f"plugins/{plugin_name}/{INDEX_YAML_NAME}"
+    if not _git_path_exists(commit, rel_path):
+        _fail(f"Missing {INDEX_YAML_NAME}: {rel_path}")
+    raw_text = _git_read_text(commit, rel_path)
     if len(raw_text) > INDEX_YAML_MAX_CHARS:
         _fail(f"{INDEX_YAML_NAME} exceeds max total length {INDEX_YAML_MAX_CHARS} characters")
     try:
         loaded = yaml.safe_load(raw_text)
     except Exception as e:
-        _fail(f"Invalid YAML in {plugin_yaml.relative_to(REPO_ROOT)}: {e}")
+        _fail(f"Invalid YAML in {rel_path}: {e}")
     if not isinstance(loaded, dict):
         _fail(f"{INDEX_YAML_NAME} must be a YAML mapping/object")
     return cast(dict[str, Any], loaded)
@@ -143,10 +214,17 @@ def _normalize_repo_url(url: str) -> str | None:
     return f"https://github.com/{owner.lower()}/{repo.lower()}"
 
 
-def _validate_github_repo_not_in_index(plugin_name: str, url: str) -> None:
-    normalized_url = _normalize_repo_url(url)
-    if not normalized_url or not INDEX_JSON_PATH.exists():
-        return
+def _repo_owner_from_url(url: str) -> str | None:
+    parsed = _parse_repo_url(url)
+    if not parsed:
+        return None
+    owner, _ = parsed
+    return owner
+
+
+def _load_index_plugins() -> dict[str, Any]:
+    if not INDEX_JSON_PATH.exists():
+        return {}
     try:
         loaded = json.loads(INDEX_JSON_PATH.read_text(encoding="utf-8"))
     except Exception as e:
@@ -155,7 +233,42 @@ def _validate_github_repo_not_in_index(plugin_name: str, url: str) -> None:
         _fail(f"{INDEX_JSON_PATH.name} must contain a JSON object")
     plugins = loaded.get("plugins")
     if not isinstance(plugins, dict):
+        return {}
+    return cast(dict[str, Any], plugins)
+
+
+def _indexed_plugin(plugin_name: str) -> dict[str, Any] | None:
+    plugins = _load_index_plugins()
+    plugin = plugins.get(plugin_name)
+    return cast(dict[str, Any], plugin) if isinstance(plugin, dict) else None
+
+
+def _pr_author() -> str | None:
+    author = os.environ.get("PR_AUTHOR", "").strip()
+    return author or None
+
+
+def _warn_if_non_owner_update_or_delete(plugin_name: str, action: str) -> None:
+    indexed = _indexed_plugin(plugin_name)
+    if not isinstance(indexed, dict):
         return
+    github = indexed.get("github")
+    owner = _repo_owner_from_url(github) if isinstance(github, str) else None
+    author = _pr_author()
+    if not owner or not author:
+        return
+    if owner.lower() != author.lower():
+        _warn(
+            f"PR author '@{author}' is not the owner of the indexed plugin repository '@{owner}' "
+            f"for plugin '{plugin_name}' during {action}"
+        )
+
+
+def _validate_github_repo_not_in_index(plugin_name: str, url: str) -> None:
+    normalized_url = _normalize_repo_url(url)
+    if not normalized_url or not INDEX_JSON_PATH.exists():
+        return
+    plugins = _load_index_plugins()
     for indexed_plugin_name, indexed_plugin in plugins.items():
         if indexed_plugin_name == plugin_name or not isinstance(indexed_plugin, dict):
             continue
@@ -293,27 +406,31 @@ def _validate_github_repo(url: str, plugin_name: str) -> None:
     _validate_remote_plugin_name(content_obj, plugin_name)
 
 
-def _validate_thumbnail(plugin_dir: Path) -> None:
-    thumbnails = [p for p in plugin_dir.iterdir() if p.is_file() and p.stem == "thumbnail"]
+def _validate_thumbnail(plugin_name: str) -> None:
+    commit = _head_sha()
+    plugin_files = _git_plugin_files(commit, plugin_name)
+    thumbnails = [name for name in plugin_files if Path(name).stem == "thumbnail"]
     if len(thumbnails) > 1:
         _fail("Only one thumbnail file is allowed")
     if not thumbnails:
         return
-    thumbnail = thumbnails[0]
+    thumbnail_name = thumbnails[0]
+    thumbnail = Path(thumbnail_name)
     if thumbnail.suffix.lower() not in ALLOWED_IMAGE_EXTS:
         _fail("thumbnail must be png/jpg/jpeg/webp")
-    if thumbnail.stat().st_size > THUMBNAIL_MAX_BYTES:
+    thumbnail_bytes = _git_read_bytes(commit, f"plugins/{plugin_name}/{thumbnail_name}")
+    if len(thumbnail_bytes) > THUMBNAIL_MAX_BYTES:
         _fail("thumbnail exceeds 20 KB")
-    with Image.open(thumbnail) as img:
+    with Image.open(io.BytesIO(thumbnail_bytes)) as img:
         width, height = img.size
     if width != height:
         _fail("thumbnail must be square")
 
 
-def _validate_allowed_files(plugin_dir: Path) -> None:
-    for path in plugin_dir.iterdir():
-        if path.is_dir():
-            _fail(f"Unexpected directory in plugin folder: {path.name}")
+def _validate_allowed_files(plugin_name: str) -> None:
+    commit = _head_sha()
+    for name in _git_plugin_files(commit, plugin_name):
+        path = Path(name)
         if path.name == INDEX_YAML_NAME:
             continue
         if path.stem == "thumbnail" and path.suffix.lower() in ALLOWED_IMAGE_EXTS:
@@ -322,18 +439,28 @@ def _validate_allowed_files(plugin_dir: Path) -> None:
 
 
 def main() -> int:
-    paths = _changed_files()
+    entries = _changed_entries()
+    paths = _all_changed_paths(entries)
     if not paths:
         _fail("No changed files detected")
     plugin_name = _submission_plugin_name(paths)
-    plugin_dir = _plugin_dir(plugin_name)
-    if not plugin_dir.exists() or not plugin_dir.is_dir():
+    if _is_deletion_pr(entries, plugin_name):
+        if _git_path_exists(_head_sha(), f"plugins/{plugin_name}/{INDEX_YAML_NAME}"):
+            _fail(f"Deletion PR must remove the plugin directory entirely: plugins/{plugin_name}")
+        if _indexed_plugin(plugin_name) is None:
+            _fail(f"Cannot delete plugin '{plugin_name}' because it is not present in {INDEX_JSON_PATH.name}")
+        _warn_if_non_owner_update_or_delete(plugin_name, "deletion")
+        print(f"Validation passed for plugin deletion: {plugin_name}")
+        return 0
+    if not _git_path_exists(_head_sha(), f"plugins/{plugin_name}/{INDEX_YAML_NAME}"):
         _fail(f"Plugin directory does not exist in PR head: plugins/{plugin_name}")
+    if _indexed_plugin(plugin_name) is not None:
+        _warn_if_non_owner_update_or_delete(plugin_name, "update")
     meta = _read_plugin_yaml(plugin_name)
     _validate_fields(meta, plugin_name)
     _validate_github_repo_not_in_index(plugin_name, cast(str, meta.get("github")))
-    _validate_allowed_files(plugin_dir)
-    _validate_thumbnail(plugin_dir)
+    _validate_allowed_files(plugin_name)
+    _validate_thumbnail(plugin_name)
     print(f"Validation passed for plugin: {plugin_name}")
     return 0
 
