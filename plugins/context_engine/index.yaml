@@ -4,8 +4,6 @@ github: https://github.com/a0-community-plugins/context_engine.git
 tags:
   - context
   - memory
-  - storage
   - retrieval
-  - vector
-  - embedding
   - RAG
+  - search
